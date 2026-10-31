@@ -1,7 +1,7 @@
 import re
 from datetime import datetime
 
-TIME_WINDOW_SECONDS = 60    
+TIME_WINDOW_SECONDS = 60   
 FAILURES_IN_WINDOW = 3
 FAILED_LOGIN_THRESHOLD = 3
 
@@ -19,9 +19,12 @@ failed_login_timeframe = {}
 accepted_login_count = {}
 alerts = []
 
-with open('sample_auth.txt', 'r') as file:
+with open('/var/log/lab/10.10.10.150.log', 'r') as file:
     for line in file:
-        event_time = datetime.fromisoformat(line[:25])
+        try:
+            event_time = datetime.fromisoformat(line[:25])
+        except ValueError:
+            continue
         if re.search(r"Invalid user", line, re.IGNORECASE):
             match = re.search(r'Invalid user ([\w\s]+) from ([\d.]+)', line, re.IGNORECASE)
             if match:
@@ -29,7 +32,7 @@ with open('sample_auth.txt', 'r') as file:
                 events.append({
                     "type": "invalid_user",
                     "user": match.group(1),
-                    "ip":ip,
+                    "ip": ip,
                     "time": event_time
                 })
         elif re.search(r"Failed password", line, re.IGNORECASE):
@@ -39,7 +42,7 @@ with open('sample_auth.txt', 'r') as file:
                 events.append({
                     "type": "failed_password",
                     "user": match.group(1),
-                    "ip":ip,
+                    "ip": ip,
                     "time": event_time
                 })
                 failed_login_count[ip] = failed_login_count.get(ip, 0) + 1
@@ -53,7 +56,7 @@ with open('sample_auth.txt', 'r') as file:
                 events.append({
                     "type": "accepted_password",
                     "user": match.group(1),
-                    "ip":ip,
+                    "ip": ip,
                     "time": event_time
                 })
                 accepted_login_count[ip] = accepted_login_count.get(ip, 0) + 1

@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.idea/
+.vscode/
+re_match.py
+sample_auth.txt

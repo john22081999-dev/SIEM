@@ -1,5 +1,6 @@
 import re
 from datetime import datetime
+import time
 
 TIME_WINDOW_SECONDS = 60   
 FAILURES_IN_WINDOW = 3
@@ -20,7 +21,13 @@ accepted_login_count = {}
 alerts = []
 
 with open('/var/log/lab/10.10.10.150.log', 'r') as file:
-    for line in file:
+    file.seek(0, 2)  # Move the cursor to the end of the file
+    while True:
+        line = file.readline()
+        if not line:
+            time.sleep(0.5)  # Sleep briefly to avoid busy waiting
+            continue
+        print("NEW LINE:", line.strip())
         try:
             event_time = datetime.fromisoformat(line[:25])
         except ValueError:
@@ -69,7 +76,7 @@ with open('/var/log/lab/10.10.10.150.log', 'r') as file:
                     "ip": ip,
                     "time": event_time
                 })
-        
+   
 for ip, count in failed_login_count.items():
     if count >= FAILED_LOGIN_THRESHOLD:
         if ip in accepted_login_count:

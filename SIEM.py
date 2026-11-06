@@ -19,6 +19,7 @@ failed_login_count = {}
 failed_login_timeframe = {}
 accepted_login_count = {}
 alerts = []
+alerted_ips = set()
 
 with open('/var/log/lab/10.10.10.150.log', 'r') as file:
     file.seek(0, 2)  # Move the cursor to the end of the file
@@ -27,7 +28,6 @@ with open('/var/log/lab/10.10.10.150.log', 'r') as file:
         if not line:
             time.sleep(0.5)  # Sleep briefly to avoid busy waiting
             continue
-        print("NEW LINE:", line.strip())
         try:
             event_time = datetime.fromisoformat(line[:25])
         except ValueError:
@@ -56,6 +56,13 @@ with open('/var/log/lab/10.10.10.150.log', 'r') as file:
                 if ip not in failed_login_timeframe:
                     failed_login_timeframe[ip] = []
                 failed_login_timeframe[ip].append(event_time)
+                if ip not in alerted_ips:
+                    if failed_login_count[ip] >= FAILED_LOGIN_THRESHOLD or failed_attempts_within_timeframe(failed_login_timeframe[ip]):
+                        if ip in accepted_login_count:
+                            print(f"[HIGH] Successful Brute Force Attack detected from IP: {ip} with {failed_login_count[ip]} failed attempts.")
+                        else:
+                            print(f"[MEDIUM] Multiple Failed Login Attempts Within Timeframe detected from IP: {ip} with {len(failed_login_timeframe[ip])} failed attempts.")
+                        alerted_ips.add(ip)
         elif re.search(r"Accepted password", line, re.IGNORECASE):
             match = re.search(r'Accepted password for ([\w\s]+) from ([\d.]+)', line, re.IGNORECASE)
             if match:
@@ -77,28 +84,5 @@ with open('/var/log/lab/10.10.10.150.log', 'r') as file:
                     "time": event_time
                 })
    
-for ip, count in failed_login_count.items():
-    if count >= FAILED_LOGIN_THRESHOLD:
-        if ip in accepted_login_count:
-            alerts.append({
-                "severity": "High",
-                "type": "Successful Brute Force Attack",
-                "ip": ip,
-                "failed_attempts": count
-            })
-        else:
-            alerts.append({
-                "severity": "Medium",
-                "type": "Possible Brute Force Attack",
-                "ip": ip,
-                "failed_attempts": count
-            })
-for ip, timestamps in failed_login_timeframe.items():
-    if failed_attempts_within_timeframe(timestamps):
-        alerts.append({
-            "severity": "Medium",
-            "type": "Multiple Failed Login Attempts Within Timeframe",
-            "ip": ip,
-            "failed_attempts": len(timestamps)
-        })
-print(alerts)
+
+

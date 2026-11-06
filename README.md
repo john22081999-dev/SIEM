@@ -1,18 +1,107 @@
-# SIEM – Auth Log Analyzer
-A small Python tool that parses Linux authentication logs (`auth.log`) to detect failed SSH login attempts using regular expressions.
-#-------------------------------------------#
-## Features
-- Finds "Failed password" entries in the log
-- Extracts the targeted username and source IP with regex groups
-- Counts failed attempts
-#-------------------------------------------#
-## Usage
-python SIEM.py
-Place an auth log named sample_auth.txt in the same folder before running.
-#-------------------------------------------#
+# Mini-SIEM — Real-Time SSH Brute-Force Detection
+
+A lightweight, real-time Security Information and Event Management (SIEM) tool written in Python. It tails live Linux authentication logs forwarded from a monitored host, parses them into structured security events, and raises severity-rated alerts for SSH brute-force attacks — including attacks whose log lines have been collapsed by syslog deduplication.
+
+Built and tested end-to-end in a self-contained home lab (attacker → target → collector), so every alert fires on real attack traffic, not synthetic samples.
+
+---
+
+## What it detects
+
+| Alert | Trigger | Severity |
+|-------|---------|----------|
+| Brute-force attempt | ≥ N failed logins from one IP | MEDIUM |
+| Brute-force burst | ≥ N failed logins from one IP within a time window | MEDIUM |
+| Successful compromise | Failed logins from an IP that then logs in successfully | HIGH |
+
+Thresholds (`FAILED_LOGIN_THRESHOLD`, `FAILURES_IN_WINDOW`, `TIME_WINDOW_SECONDS`) are configurable constants at the top of the script.
+
+---
+
+## Lab architecture
+
+The tool is developed and run inside an isolated virtualization lab:
+
+```
+                 Ubuntu 24.04 host  (KVM / libvirt, UFW firewall)
+                 ├─────────────────────────────────────────────┐
+   Kali VM  ─────┤ default NAT network   (internet access)      │
+  (attacker)     │                                              │
+       │         │ lab-isolated network  10.10.10.0/24          │
+       │ attacks │   (no internet, no home-network route)       │
+       ▼         │                                              │
+  Metasploitable 2 ── syslog/UDP 514 ──►  rsyslog ──► /var/log/lab/10.10.10.150.log
+   (target, 10.10.10.150)                     │
+                                              ▼
+                                        SIEM.py  (tails the live log, detects, alerts)
+```
+
+- **Host:** Ubuntu 24.04 LTS laptop running KVM/QEMU with `virt-manager`. Full-disk encryption, UFW firewall (deny inbound except SSH), managed over SSH from a separate workstation.
+- **Attacker:** Kali Linux VM, on both the NAT network (for tooling/updates) and the isolated lab network.
+- **Target:** Metasploitable 2, attached **only** to the isolated network — it cannot reach the internet or the home LAN (isolation verified by test). It forwards its authentication logs to the host, where the SIEM reads them.
+
+**Why KVM over Proxmox:** the lab lives on a laptop that also needs a GUI and Wi-Fi; KVM + virt-manager gives a desktop-friendly hypervisor, while Proxmox is server-only and awkward on wireless. KVM is also the native Linux hypervisor used in production infrastructure.
+
+---
+
+## How it works
+
+1. **Log forwarding.** The target's syslog daemon forwards all events over UDP to the host's `rsyslog`, which writes per-source files under `/var/log/lab/`.
+2. **Live tailing.** `SIEM.py` opens the log, seeks to the end, and continuously reads newly appended lines (a `tail -f`–style loop), so it reacts to events as they happen.
+3. **Parsing.** Each line is matched against a set of regex patterns and turned into a structured event (`invalid_user`, `failed_password`, `accepted_password`, `possible_break_in`, `pam_failure`), capturing the timestamp, source IP, and username where present. Malformed lines are skipped, not fatal.
+4. **Detection.** Per-IP failure counts and failure timestamps are maintained as running state. After each relevant event, a shared `check_and_alert()` routine evaluates the thresholds and the time window and emits a structured alert if warranted. An `alerted_ips` set suppresses duplicate alerts for an IP already flagged.
+
+---
+
+## Design decisions & challenges
+
+These are the real problems encountered while building the lab and tool, and how they were handled — the parts that required judgment rather than just code.
+
+### Syslog deduplication hid attack volume
+Three failed passwords within a single SSH connection produce three **identical** log lines (same source port), which syslog collapses into one line plus `last message repeated N times`. The detector only saw a single failure and never reached its threshold — an attack that produced no alert. Disabling repeated-message reduction on the collector did not help, because the *target's* legacy `sysklogd` compresses the lines **before forwarding**.
+
+**Solution:** rather than depend on reconfiguring every log source (not realistic in the field), the tool parses the companion `PAM N more authentication failures` summary line — which is **not** collapsed and states both the count and the source IP — and recovers the hidden failures. A single collapsed connection is now counted correctly (1 visible failure + N recovered = true total). This makes the detector resilient to messy, real-world logs instead of only clean ones.
+
+### Downtime blind spot
+The tailing loop seeks to the end of the log on startup, so it only sees events that occur while it is running. Anything logged while the tool is down is missed. This is a deliberate simplicity trade-off; see *Limitations*.
+
+### Successful-compromise detection is one-directional
+Detection runs on failure events. A HIGH "successful brute-force" alert therefore fires only if a success is already recorded when the failure threshold is crossed; a success arriving *after* an IP has been flagged does not currently upgrade the alert. Noted as future work.
+
+### Over-counting ers toward detection
+The PAM-recovery approximation can, in rare configurations, count a failure more than once, and it attributes all recovered failures to a single timestamp. For a *detector*, over-flagging is safer than missing an attack, so this bias is intentional and documented rather than suppressed.
+
+---
+
+## Limitations & future work
+
+- **Resume after restart (checkpointing).** Persist the log file offset so the tool catches up on events that occurred while it was down, instead of seeking to end.
+- **Alert correlation.** Collapse multiple detections for the same IP/incident into a single correlated alert to reduce noise.
+- **Escalate on later success.** Upgrade an existing MEDIUM alert to HIGH when a flagged IP subsequently authenticates successfully.
+- **More log sources & attack types.** Scan detection (connection probes), additional services, and non-SSH sources.
+- **Persisted, structured alert output.** Write alerts to JSON/CSV and/or a dashboard rather than stdout.
+- **Configurable log path.** Accept the log path as a command-line argument instead of a hardcoded constant.
+
+---
+
+## Running it
+
+The tool expects a forwarded authentication log on the collector (default path is set near the top of `SIEM.py`).
+
+```bash
+python3 SIEM.py
+```
+
+It runs continuously and prints alerts to the terminal as attacks occur. Stop it with `Ctrl+C`.
+
+For offline testing, point the script at the included sample log instead of the live path.
+
+---
+
 ## What I practiced
-- Regular expressions (`re.search`, groups, named groups)
-- Reading and parsing log files in Python
-- Basic security log analysis
-#-------------------------------------------#
-Known limitation: The monitor only detects events that occur while it’s running. Events during downtime are missed (the cursor seeks to end on startup). Future improvement: checkpoint the file offset to resume after restarts.
+
+- Log pipeline engineering: syslog forwarding, `rsyslog` routing, and debugging why events did not arrive (wrong config file, port typo, daemon reload vs. restart, folder permissions, message deduplication).
+- Streaming log analysis in Python: live file tailing, regex event extraction, stateful per-IP aggregation, and time-window detection with `datetime`.
+- Detection engineering judgment: thresholds and their false-positive/false-negative trade-offs, deduplication-resistant counting, and reasoning about what an alert should and should not fire on.
+- Virtualization and network isolation with KVM/libvirt; verifying that a deliberately vulnerable target cannot reach the outside world.
+- The offensive side that generates the telemetry: service enumeration, exploiting a backdoored service, offline password cracking, and authenticating with recovered credentials — producing the exact log patterns the SIEM is built to catch.

@@ -62,8 +62,8 @@ Three failed passwords within a single SSH connection produce three **identical*
 
 **Solution:** rather than depend on reconfiguring every log source (not realistic in the field), the tool parses the companion `PAM N more authentication failures` summary line — which is **not** collapsed and states both the count and the source IP — and recovers the hidden failures. A single collapsed connection is now counted correctly (1 visible failure + N recovered = true total). This makes the detector resilient to messy, real-world logs instead of only clean ones.
 
-### Downtime blind spot
-The tailing loop seeks to the end of the log on startup, so it only sees events that occur while it is running. Anything logged while the tool is down is missed. This is a deliberate simplicity trade-off; see *Limitations*.
+### Resuming after restart (checkpointing)
+The tool records its position in the log — the byte offset returned by `file.tell()` — to a small checkpoint file after each processed line. On startup it reads that offset and seeks to it, rather than jumping to the end of the file. This means events written while the tool was stopped (a crash, a restart, a host reboot) are processed when it comes back up, instead of being silently missed. The offset is saved after a line is fully processed, so an interrupted run re-reads the in-flight line rather than skipping it — favouring "process at least once" over "miss an event," the safer bias for a detector.
 
 ### Successful-compromise detection is one-directional
 Detection runs on failure events. A HIGH "successful brute-force" alert therefore fires only if a success is already recorded when the failure threshold is crossed; a success arriving *after* an IP has been flagged does not currently upgrade the alert. Noted as future work.
@@ -75,12 +75,12 @@ The PAM-recovery approximation can, in rare configurations, count a failure more
 
 ## Limitations & future work
 
-- **Resume after restart (checkpointing).** Persist the log file offset so the tool catches up on events that occurred while it was down, instead of seeking to end.
 - **Alert correlation.** Collapse multiple detections for the same IP/incident into a single correlated alert to reduce noise.
 - **Escalate on later success.** Upgrade an existing MEDIUM alert to HIGH when a flagged IP subsequently authenticates successfully.
 - **More log sources & attack types.** Scan detection (connection probes), additional services, and non-SSH sources.
 - **Persisted, structured alert output.** Write alerts to JSON/CSV and/or a dashboard rather than stdout.
 - **Configurable log path.** Accept the log path as a command-line argument instead of a hardcoded constant.
+- **Handle log rotation.** If the log is rotated or truncated, the saved offset can point past the end of the new file. Detect this (saved offset > file size) and reset to 0.
 
 ---
 

@@ -5,6 +5,18 @@ import time
 TIME_WINDOW_SECONDS = 60   
 FAILURES_IN_WINDOW = 3
 FAILED_LOGIN_THRESHOLD = 3
+CHECKPOINT_FILE = '/home/akuma/SIEM/parser_checkpoint.txt'
+
+def load_offset():
+    try:
+        with open(CHECKPOINT_FILE, 'r') as f:
+            return int(f.read())
+    except FileNotFoundError:
+        return 0  # First run — start from the beginning of the log file
+
+def save_offset(offset):
+    with open(CHECKPOINT_FILE, 'w') as f:
+        f.write(str(offset))
 
 def failed_attempts_within_timeframe(timestamps):
     timestamps.sort()
@@ -29,8 +41,9 @@ failed_login_timeframe = {}
 accepted_login_count = {}
 alerted_ips = set()
 
+offset = load_offset()
 with open('/var/log/lab/10.10.10.150.log', 'r') as file:
-    file.seek(0, 2)  # Move the cursor to the end of the file
+    file.seek(offset)  # Move the cursor to the last known position
     while True:
         line = file.readline()
         if not line:
@@ -66,7 +79,7 @@ with open('/var/log/lab/10.10.10.150.log', 'r') as file:
                 failed_login_timeframe[ip].append(event_time)
                 check_and_alert(ip)
         elif re.search(r"PAM", line): # not using IGNORECASE here because PAM logs are case-sensitive
-            match = re.search(r"PAM ([\d]) .* rhost=([\d.]+)", line)
+            match = re.search(r"PAM (\d+) .* rhost=([\d.]+)", line)
             if match:
                 ip = match.group(2)
                 for _ in range(int(match.group(1))):
@@ -100,6 +113,5 @@ with open('/var/log/lab/10.10.10.150.log', 'r') as file:
                     "ip": ip,
                     "time": event_time
                 })
-   
-
-
+        offset = file.tell()  # Update the offset to the current position after reading the line
+        save_offset(offset)  # Save the current offset to the checkpoint file

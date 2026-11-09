@@ -6,3 +6,5 @@ venv/
 .vscode/
 re_match.py
 sample_auth.txt
+test_byte_offset.py
+parser_checkpoint.txt

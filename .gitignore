@@ -4,6 +4,7 @@ __pycache__/
 venv/
 .idea/
 .vscode/
+*.save
 re_match.py
 sample_auth.txt
 test_byte_offset.py

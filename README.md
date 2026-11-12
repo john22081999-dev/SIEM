@@ -1,6 +1,6 @@
-# Mini-SIEM — Real-Time SSH Brute-Force Detection
+# Mini-SIEM — Real-Time SSH Attack Detection
 
-A lightweight, real-time Security Information and Event Management (SIEM) tool written in Python. It tails live Linux authentication logs forwarded from a monitored host, parses them into structured security events, and raises severity-rated alerts for SSH brute-force attacks — including attacks whose log lines have been collapsed by syslog deduplication.
+A lightweight, real-time Security Information and Event Management (SIEM) tool written in Python. It tails live Linux authentication logs forwarded from a monitored host, parses them into structured security events, and raises severity-rated alerts across the stages of an SSH attack — from early-stage scanning, through username enumeration and brute-force, to a successful compromise — including attacks whose log lines have been collapsed by syslog deduplication.
 
 Built and tested end-to-end in a self-contained home lab (attacker → target → collector), so every alert fires on real attack traffic, not synthetic samples.
 
@@ -10,12 +10,15 @@ Built and tested end-to-end in a self-contained home lab (attacker → target �
 
 | Alert | Trigger | Severity |
 |-------|---------|----------|
+| Possible scan / probe | ≥ N bare TCP connections to SSH that never send a protocol banner, from one IP | LOW |
+| Username enumeration | ≥ N distinct usernames tried from one IP | MEDIUM |
 | Brute-force attempt | ≥ N failed logins from one IP | MEDIUM |
 | Brute-force burst | ≥ N failed logins from one IP within a time window | MEDIUM |
 | Successful compromise | Failed logins from an IP that then logs in successfully | HIGH |
-| Username enumeration | One IP tries ≥ 5 distinct non-existent usernames | MEDIUM |
 
-Thresholds (`FAILED_LOGIN_THRESHOLD`, `FAILURES_IN_WINDOW`, `TIME_WINDOW_SECONDS`) are configurable constants at the top of the script.
+Brute-force and compromise alerts are additionally **enriched** with a `reverse_dns_mismatch` field (see *Signal correlation* below).
+
+Thresholds (`FAILED_LOGIN_THRESHOLD`, `FAILURES_IN_WINDOW`, `TIME_WINDOW_SECONDS`, `USERNAME_ENUMERATION_THRESHOLD`, `SCAN_THRESHOLD`) are configurable constants at the top of the script.
 
 ---
 
@@ -48,14 +51,24 @@ The tool is developed and run inside an isolated virtualization lab:
 ## How it works
 
 1. **Log forwarding.** The target's syslog daemon forwards all events over UDP to the host's `rsyslog`, which writes per-source files under `/var/log/lab/`.
-2. **Live tailing.** `SIEM.py` opens the log, seeks to the end, and continuously reads newly appended lines (a `tail -f`–style loop), so it reacts to events as they happen.
-3. **Parsing.** Each line is matched against a set of regex patterns and turned into a structured event (`invalid_user`, `failed_password`, `accepted_password`, `possible_break_in`, `pam_failure`), capturing the timestamp, source IP, and username where present. Malformed lines are skipped, not fatal.
-4. **Detection.** Per-IP failure counts and failure timestamps are maintained as running state. After each relevant event, a shared `check_and_alert()` routine evaluates the thresholds and the time window and emits a structured alert if warranted. An `alerted_ips` set suppresses duplicate alerts for an IP already flagged.
-### Alert output
-Alerts are written to `alert.jsonl` in JSON Lines format — one JSON object per line, appended as each alert fires. This gives a durable, machine-readable record (parseable line-by-line, ingestible by a dashboard or pipeline) rather than console-only output. Each record carries severity, type, source IP, the relevant count, and a timestamp.
+2. **Resumable tailing.** On startup `SIEM.py` reads a saved **byte offset** (checkpoint) and seeks there, so it catches up on events logged while it was down instead of only seeing new ones. It then continuously reads newly appended lines (a `tail -f`–style loop). The log is opened with `errors="replace"` so a stray non-UTF-8 byte (e.g. from a scanner's binary probe) can't crash the reader.
+3. **Parsing.** Each line is matched against a set of regex patterns and turned into a structured event (`possible_scan`, `invalid_user`, `failed_password`, `pam_failure`, `accepted_password`, `possible_break_in`), capturing the timestamp, source IP, and username where present. Malformed lines are skipped, not fatal.
+4. **Detection.** Per-IP counters and failure timestamps are maintained as running state. After each relevant event, a dedicated `check_*` routine evaluates its thresholds (and, for brute-force, a time window) and emits a structured alert if warranted. Per-IP dedup sets (`scanned_ips`, `enumerated_ips`, `alerted_ips`, `compromised_ips`) suppress duplicate alerts for an IP already flagged.
+5. **Alerting.** Every alert is printed to stdout **and** appended to a persistent JSON Lines file (see below).
 
-### Username enumeration detection
-Separately from password brute-force, the tool tracks the set of distinct usernames each IP attempts against non-existent accounts (Invalid user events). An IP probing many different usernames is enumerating valid accounts — a distinct behaviour from hammering one account's password. A set per IP naturally dedupes sshd logging each invalid-user attempt twice.
+---
+
+## Alert output
+
+Alerts are written to `alert.jsonl` in [JSON Lines](https://jsonlines.org/) format — one self-contained JSON object per line, append-friendly and trivial to parse, grep, or feed into another tool. Example:
+
+```json
+{"severity": "LOW", "ip": "10.10.10.137", "type": "possible_scan", "count": 6, "timestamp": "2026-11-12T21:21:04.512388"}
+{"severity": "MEDIUM", "ip": "10.10.10.137", "type": "username_enumeration", "distinct_usernames": 5, "timestamp": "2026-11-12T21:22:10.883201"}
+{"severity": "MEDIUM", "ip": "10.10.10.137", "type": "bruteforce_attempt", "failed_attempts": 3, "reverse_dns_mismatch": true, "timestamp": "2026-11-12T21:23:28.525069"}
+{"severity": "HIGH", "ip": "10.10.10.137", "type": "successful_bruteforce", "failed_attempts": 3, "reverse_dns_mismatch": true, "timestamp": "2026-11-12T21:24:01.104772"}
+```
+
 ---
 
 ## Design decisions & challenges
@@ -67,13 +80,23 @@ Three failed passwords within a single SSH connection produce three **identical*
 
 **Solution:** rather than depend on reconfiguring every log source (not realistic in the field), the tool parses the companion `PAM N more authentication failures` summary line — which is **not** collapsed and states both the count and the source IP — and recovers the hidden failures. A single collapsed connection is now counted correctly (1 visible failure + N recovered = true total). This makes the detector resilient to messy, real-world logs instead of only clean ones.
 
-### Resuming after restart (checkpointing)
-The tool records its position in the log — the byte offset returned by `file.tell()` — to a small checkpoint file after each processed line. On startup it reads that offset and seeks to it, rather than jumping to the end of the file. This means events written while the tool was stopped (a crash, a restart, a host reboot) are processed when it comes back up, instead of being silently missed. The offset is saved after a line is fully processed, so an interrupted run re-reads the in-flight line rather than skipping it — favouring "process at least once" over "miss an event," the safer bias for a detector.
+### Logs contain arbitrary bytes, not clean text
+A scanner's service-detection probes (`nmap -sV`) send **binary payloads** at the port, and fragments of that garbage ended up in the forwarded log. Reading the file in text mode, Python tried to UTF-8-decode a byte like `0xee`, raised `UnicodeDecodeError`, and crashed the whole tool.
+
+**Solution:** open the log with `errors="replace"`, which substitutes undecodable bytes with a placeholder and keeps reading. The garbage line fails the timestamp parse and is skipped harmlessly. A second concrete example of the same principle as the dedup fix: **a log parser must degrade gracefully on malformed input, never assume pristine data.**
+
+### Signal correlation: enriching alerts instead of adding noise
+Old SSH logs a `POSSIBLE BREAK-IN ATTEMPT` warning when a source's forward/reverse DNS don't match. On its own this is a **weak, noisy** signal — it fires on every connection and has many benign causes (a host with no PTR record). Alerting on it directly would bury real findings.
+
+**Solution:** the break-in line raises **no alert of its own**. Instead, each flagged IP is recorded, and brute-force / compromise alerts carry a `reverse_dns_mismatch` field. A weak signal (suspicious DNS) combined with a strong one (brute-force) yields a **higher-confidence** detection than either alone — standard SIEM correlation, with zero added noise.
+
+### Scan detection is log-based, and that has limits
+The tool flags an IP that opens repeated bare TCP connections to SSH without sending a protocol banner — the signature of a **connect-style** probe, which completes the TCP handshake and is therefore seen (and logged) by sshd as `Did not receive identification string`. This catches recon *before* any login attempt. But a stealthy **SYN / half-open scan** never completes the handshake, so the application never sees it and nothing is logged — such scans are invisible to a log-based detector and would need packet-level visibility (firewall/IDS) to catch. The current detector also counts connections to a *single* port, whereas a classic port scan sprays *many* ports once each. Documented as a known boundary of this approach, not a bug.
 
 ### Successful-compromise detection is one-directional
-Detection runs on failure events. A HIGH "successful brute-force" alert therefore fires only if a success is already recorded when the failure threshold is crossed; a success arriving *after* an IP has been flagged does not currently upgrade the alert. Noted as future work.
+Detection runs on failure events. A HIGH "successful brute-force" alert fires only if the failure threshold is already crossed when the success arrives; a success that lands *before* enough failures are recorded won't retroactively upgrade the alert. The reverse-DNS enrichment shares this ordering sensitivity (the break-in line must be seen before the alert fires to be reflected). Noted as future work.
 
-### Over-counting ers toward detection
+### Over-counting errs toward detection
 The PAM-recovery approximation can, in rare configurations, count a failure more than once, and it attributes all recovered failures to a single timestamp. For a *detector*, over-flagging is safer than missing an attack, so this bias is intentional and documented rather than suppressed.
 
 ---
@@ -81,21 +104,25 @@ The PAM-recovery approximation can, in rare configurations, count a failure more
 ## Limitations & future work
 
 - **Alert correlation.** Collapse multiple detections for the same IP/incident into a single correlated alert to reduce noise.
-- **Escalate on later success.** Upgrade an existing MEDIUM alert to HIGH when a flagged IP subsequently authenticates successfully.
-- **More log sources & attack types.** Scan detection (connection probes), additional services, and non-SSH sources.
-- **Configurable log path.** Accept the log path as a command-line argument instead of a hardcoded constant.
+- **Escalate on later success.** Upgrade an existing MEDIUM alert to HIGH when a flagged IP subsequently authenticates successfully (currently one-directional).
+- **Downtime vs. checkpoint.** Checkpointing resumes from the saved offset, but the checkpoint is tied to one log path; pointing the tool at a *different* log reuses an offset that is meaningless for it (mitigated only when the new file is smaller, via rotation detection). A per-log checkpoint would fix this.
+- **Packet-level scan detection.** Catch SYN/half-open scans and multi-port sweeps that never reach the application log.
+- **More log sources & attack types.** Additional services and non-SSH sources.
+- **Dashboard / alerting.** Surface the JSON alert stream in a dashboard or push notifications rather than a file plus stdout.
 
 ---
 
 ## Running it
 
-The tool expects a forwarded authentication log on the collector (default path is set near the top of `SIEM.py`).
+The tool tails a forwarded authentication log on the collector. The log path can be given as an optional argument; with no argument it falls back to the lab default near the top of `SIEM.py`.
 
 ```bash
-python3 SIEM.py
+python3 SIEM.py                         # watch the lab default log
+python3 SIEM.py /var/log/auth.log       # watch any other log
+python3 SIEM.py --help                  # usage
 ```
 
-It runs continuously and prints alerts to the terminal as attacks occur. Stop it with `Ctrl+C`.
+It runs continuously and prints alerts to the terminal as attacks occur, while also appending them to `alert.jsonl`. Stop it with `Ctrl+C`; on the next run it resumes from where it left off.
 
 For offline testing, point the script at the included sample log instead of the live path.
 
@@ -104,7 +131,9 @@ For offline testing, point the script at the included sample log instead of the 
 ## What I practiced
 
 - Log pipeline engineering: syslog forwarding, `rsyslog` routing, and debugging why events did not arrive (wrong config file, port typo, daemon reload vs. restart, folder permissions, message deduplication).
-- Streaming log analysis in Python: live file tailing, regex event extraction, stateful per-IP aggregation, and time-window detection with `datetime`.
-- Detection engineering judgment: thresholds and their false-positive/false-negative trade-offs, deduplication-resistant counting, and reasoning about what an alert should and should not fire on.
+- Streaming log analysis in Python: live file tailing, byte-offset checkpointing and rotation detection, regex event extraction, stateful per-IP aggregation, and time-window detection with `datetime`.
+- Detection engineering judgment: thresholds and their false-positive/false-negative trade-offs, deduplication-resistant counting, signal correlation (enriching strong alerts with weak corroborating signals), and reasoning about what a log-based detector can and cannot see.
+- Resilient parsing: tolerating malformed and binary input without crashing.
+- Structured, persistent output (JSON Lines) and a configurable CLI (`argparse`).
 - Virtualization and network isolation with KVM/libvirt; verifying that a deliberately vulnerable target cannot reach the outside world.
-- The offensive side that generates the telemetry: service enumeration, exploiting a backdoored service, offline password cracking, and authenticating with recovered credentials — producing the exact log patterns the SIEM is built to catch.
+- The offensive side that generates the telemetry: port/service scanning, service enumeration, exploiting a backdoored service, offline password cracking, and authenticating with recovered credentials — producing the exact log patterns the SIEM is built to catch.

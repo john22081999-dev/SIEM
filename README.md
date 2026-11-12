@@ -13,6 +13,7 @@ Built and tested end-to-end in a self-contained home lab (attacker → target �
 | Brute-force attempt | ≥ N failed logins from one IP | MEDIUM |
 | Brute-force burst | ≥ N failed logins from one IP within a time window | MEDIUM |
 | Successful compromise | Failed logins from an IP that then logs in successfully | HIGH |
+| Username enumeration | One IP tries ≥ 5 distinct non-existent usernames | MEDIUM |
 
 Thresholds (`FAILED_LOGIN_THRESHOLD`, `FAILURES_IN_WINDOW`, `TIME_WINDOW_SECONDS`) are configurable constants at the top of the script.
 
@@ -50,7 +51,11 @@ The tool is developed and run inside an isolated virtualization lab:
 2. **Live tailing.** `SIEM.py` opens the log, seeks to the end, and continuously reads newly appended lines (a `tail -f`–style loop), so it reacts to events as they happen.
 3. **Parsing.** Each line is matched against a set of regex patterns and turned into a structured event (`invalid_user`, `failed_password`, `accepted_password`, `possible_break_in`, `pam_failure`), capturing the timestamp, source IP, and username where present. Malformed lines are skipped, not fatal.
 4. **Detection.** Per-IP failure counts and failure timestamps are maintained as running state. After each relevant event, a shared `check_and_alert()` routine evaluates the thresholds and the time window and emits a structured alert if warranted. An `alerted_ips` set suppresses duplicate alerts for an IP already flagged.
+### Alert output
+Alerts are written to `alert.jsonl` in JSON Lines format — one JSON object per line, appended as each alert fires. This gives a durable, machine-readable record (parseable line-by-line, ingestible by a dashboard or pipeline) rather than console-only output. Each record carries severity, type, source IP, the relevant count, and a timestamp.
 
+### Username enumeration detection
+Separately from password brute-force, the tool tracks the set of distinct usernames each IP attempts against non-existent accounts (Invalid user events). An IP probing many different usernames is enumerating valid accounts — a distinct behaviour from hammering one account's password. A set per IP naturally dedupes sshd logging each invalid-user attempt twice.
 ---
 
 ## Design decisions & challenges
@@ -78,9 +83,7 @@ The PAM-recovery approximation can, in rare configurations, count a failure more
 - **Alert correlation.** Collapse multiple detections for the same IP/incident into a single correlated alert to reduce noise.
 - **Escalate on later success.** Upgrade an existing MEDIUM alert to HIGH when a flagged IP subsequently authenticates successfully.
 - **More log sources & attack types.** Scan detection (connection probes), additional services, and non-SSH sources.
-- **Persisted, structured alert output.** Write alerts to JSON/CSV and/or a dashboard rather than stdout.
 - **Configurable log path.** Accept the log path as a command-line argument instead of a hardcoded constant.
-- **Handle log rotation.** If the log is rotated or truncated, the saved offset can point past the end of the new file. Detect this (saved offset > file size) and reset to 0.
 
 ---
 

@@ -18,6 +18,13 @@ def save_offset(offset):
     with open(CHECKPOINT_FILE, 'w') as f:
         f.write(str(offset))
 
+def check_file_rotation(file, last_offset):
+    file.seek(0, 2)  # Move the cursor to the end of the file
+    current_size = file.tell()
+    if current_size < last_offset:
+        return True  # Log file has been rotated
+    return False
+
 def failed_attempts_within_timeframe(timestamps):
     timestamps.sort()
     for i in range(len(timestamps) - FAILURES_IN_WINDOW + 1):
@@ -35,6 +42,10 @@ def check_and_alert(ip):
                 print(f"[MEDIUM] Multiple Failed Login Attempts Within Timeframe detected from IP: {ip} with {len(failed_login_timeframe[ip])} failed attempts.")
             alerted_ips.add(ip)
 
+#def check_flagged_ip_successful_login(ip):
+#    if ip in alerted_ips and ip in accepted_login_count:
+#        print(f"[INFO] Successful login detected from previously flagged IP: {ip}.")
+
 events = []
 failed_login_count = {}
 failed_login_timeframe = {}
@@ -43,6 +54,8 @@ alerted_ips = set()
 
 offset = load_offset()
 with open('/var/log/lab/10.10.10.150.log', 'r') as file:
+    if check_file_rotation(file, offset):
+        offset = 0  # Log file has been rotated, reset offset to 0
     file.seek(offset)  # Move the cursor to the last known position
     while True:
         line = file.readline()

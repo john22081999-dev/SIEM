@@ -11,3 +11,5 @@ parser_checkpoint.txt
 # SIEM runtime output (not source)
 alert.jsonl
 parser_checkpoint.txt
+alert.jsonl
+parser_checkpoint.txt

@@ -151,7 +151,7 @@ args = parser.parse_args()
 LOG_FILE = args.logfile
 
 offset = load_offset()
-with open(LOG_FILE, "r") as file:
+with open(LOG_FILE, "r", errors='replace') as file:
     if check_file_rotation(file, offset):
         offset = 0  # Log file has been rotated, reset offset to 0
     file.seek(offset)  # Move the cursor to the last known position

@@ -2,14 +2,15 @@ import re
 from datetime import datetime
 import time
 import json
+import argparse
 
 TIME_WINDOW_SECONDS = 60
 FAILURES_IN_WINDOW = 3
 FAILED_LOGIN_THRESHOLD = 3
 USERNAME_ENUMERATION_THRESHOLD = 5
 CHECKPOINT_FILE = "/home/akuma/SIEM/parser_checkpoint.txt"
-LOG_FILE = "/var/log/lab/10.10.10.150.log"
 ALERT_FILE = "/home/akuma/SIEM/alert.jsonl"
+SCAN_THRESHOLD = 5
 
 
 def load_offset():
@@ -40,7 +41,6 @@ def failed_attempts_within_timeframe(timestamps):
             timestamps[i + FAILURES_IN_WINDOW - 1] - timestamps[i]
         ).total_seconds() <= TIME_WINDOW_SECONDS:
             return True
-
     return False
 
 
@@ -51,28 +51,18 @@ def check_and_alert(ip):
         ] >= FAILED_LOGIN_THRESHOLD or failed_attempts_within_timeframe(
             failed_login_timeframe[ip]
         ):
-            if ip in accepted_login_count:
-                print(
-                    f"[HIGH] Successful Brute Force Attack detected from IP: {ip} with {failed_login_count[ip]} failed attempts."
-                )
-                alert = {
-                    "severity": "HIGH",
-                    "ip": ip,
-                    "type": "successful_bruteforce",
-                    "failed_attempts": failed_login_count[ip],
-                    "timestamp": datetime.now().isoformat(),
-                }
-            else:
-                print(
-                    f"[MEDIUM] Multiple Failed Login Attempts detected from IP: {ip} with {len(failed_login_timeframe[ip])} failed attempts."
-                )
-                alert = {
-                    "severity": "MEDIUM",
-                    "ip": ip,
-                    "type": "bruteforce_attempt",
-                    "failed_attempts": failed_login_count[ip],
-                    "timestamp": datetime.now().isoformat(),
-                }
+            print(
+                f"[MEDIUM] Multiple Failed Login Attempts detected from IP: {ip} with {len(failed_login_timeframe[ip])} failed attempts."
+            )
+            alert = {
+                "severity": "MEDIUM",
+                "ip": ip,
+                "type": "bruteforce_attempt",
+                "failed_attempts": failed_login_count[ip],
+                "reverse_dns_mismatch": ip
+                in break_in_ips,  # True if this IP also had a reverse-DNS mismatch — combines a weak signal with a strong one for higher confidence
+                "timestamp": datetime.now().isoformat(),
+            }
             alerted_ips.add(ip)
             log_alert(alert)
 
@@ -82,12 +72,83 @@ def log_alert(alert):
         f.write(json.dumps(alert) + "\n")
 
 
+def check_enumeration(ip):
+    if (
+        len(username_attempts[ip]) >= USERNAME_ENUMERATION_THRESHOLD
+        and ip not in enumerated_ips
+    ):
+        print(
+            f"[MEDIUM] Username enumeration from IP: {ip} {len(username_attempts[ip])} distinct usernames tried"
+        )
+        alert = {
+            "severity": "MEDIUM",
+            "ip": ip,
+            "type": "username_enumeration",
+            "distinct_usernames": len(username_attempts[ip]),
+            "timestamp": datetime.now().isoformat(),
+        }
+        log_alert(alert)
+        enumerated_ips.add(ip)
+
+
+def check_compromise(ip):
+    if (
+        failed_login_count.get(ip, 0) >= FAILED_LOGIN_THRESHOLD
+        and ip not in compromised_ips
+    ):
+        print(
+            f"[HIGH] Successful brute force — IP {ip} logged in after {failed_login_count[ip]} failed attempts."
+        )
+        alert = {
+            "severity": "HIGH",
+            "ip": ip,
+            "type": "successful_bruteforce",
+            "failed_attempts": failed_login_count[ip],
+            "reverse_dns_mismatch": ip
+            in break_in_ips,  # True if this IP also had a reverse-DNS mismatch — combines a weak signal with a strong one for higher confidence
+            "timestamp": datetime.now().isoformat(),
+        }
+        log_alert(alert)
+        compromised_ips.add(ip)
+
+
+def check_scan(ip):
+    if scan_count[ip] >= SCAN_THRESHOLD and ip not in scanned_ips:
+        print(f"[LOW] Possible scan - IP {ip}")
+        alert = {
+            "severity": "LOW",
+            "ip": ip,
+            "type": "possible_scan",
+            "count": scan_count[ip],
+            "timestamp": datetime.now().isoformat(),
+        }
+        log_alert(alert)
+        scanned_ips.add(ip)
+
+
 failed_login_count = {}
 failed_login_timeframe = {}
 accepted_login_count = {}
 alerted_ips = set()
 username_attempts = {}
 enumerated_ips = set()
+compromised_ips = set()
+break_in_ips = (
+    set()
+)  # IPs flagged by sshd for reverse-DNS mismatch; used to enrich alerts, not to alert on its own
+scan_count = {}
+scanned_ips = set()
+
+parser = argparse.ArgumentParser(description="Real-time SSH brute-force SIEM")
+parser.add_argument(
+    "logfile",
+    nargs="?",
+    default="/var/log/lab/10.10.10.150.log",
+    help="Path to the auth log to monitor",
+)
+args = parser.parse_args()
+
+LOG_FILE = args.logfile
 
 offset = load_offset()
 with open(LOG_FILE, "r") as file:
@@ -111,22 +172,7 @@ with open(LOG_FILE, "r") as file:
             if ip not in username_attempts:
                 username_attempts[ip] = set()
             username_attempts[ip].add(username)
-            if (
-                len(username_attempts[ip]) >= USERNAME_ENUMERATION_THRESHOLD
-                and ip not in enumerated_ips
-            ):
-                print(
-                    f"[MEDIUM] Username enumeration from IP: {ip} {len(username_attempts[ip])} distinct usernames tried"
-                )
-                alert = {
-                    "severity": "MEDIUM",
-                    "ip": ip,
-                    "type": "username_enumeration",
-                    "distinct_usernames": len(username_attempts[ip]),
-                    "timestamp": datetime.now().isoformat(),
-                }
-                log_alert(alert)
-                enumerated_ips.add(ip)
+            check_enumeration(ip)
         elif match := re.search(
             r"Failed password for ([\w\s]+) from ([\d.]+)", line, re.IGNORECASE
         ):
@@ -151,10 +197,18 @@ with open(LOG_FILE, "r") as file:
         ):
             ip = match.group(2)
             accepted_login_count[ip] = accepted_login_count.get(ip, 0) + 1
+            check_compromise(ip)
         elif match := re.search(
             r"\[([\d.]+)\] failed - POSSIBLE BREAK-IN ATTEMPT", line, re.IGNORECASE
         ):
             ip = match.group(1)
+            break_in_ips.add(ip)
+        elif match := re.search(
+            r"Did not receive identification string from ([\d.]+)", line
+        ):
+            ip = match.group(1)
+            scan_count[ip] = scan_count.get(ip, 0) + 1
+            check_scan(ip)
         offset = (
             file.tell()
         )  # Update the offset to the current position after reading the line

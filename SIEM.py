@@ -119,7 +119,7 @@ def check_scan(ip, event_time):
         inc = get_or_create_inceident(ip, event_time)
         if "possible_scan" not in inc.signals:
             inc.add_signal("possible_scan", "LOW", event_time,
-                            scan_conections=scan_count[ip])
+                            scan_connections=scan_count[ip])
             print(f"[LOW] Possible scan - IP {ip}")
             log_incident(inc)
 

@@ -1,0 +1,1 @@
+{"ip": "10.10.10.137", "first_seen": "2026-11-16T19:57:31.179100", "last_seen": "2026-11-16T19:57:31.179100", "severity": "LOW", "signals": ["possible_scan"], "details": {"scan_connections": 5}}

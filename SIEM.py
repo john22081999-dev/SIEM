@@ -3,6 +3,7 @@ from datetime import datetime
 import time
 import json
 import argparse
+from Incidents import Incident, SEVERITY_RANK
 
 TIME_WINDOW_SECONDS = 60
 FAILURES_IN_WINDOW = 3
@@ -11,6 +12,7 @@ USERNAME_ENUMERATION_THRESHOLD = 5
 CHECKPOINT_FILE = "/home/akuma/SIEM/parser_checkpoint.txt"
 ALERT_FILE = "/home/akuma/SIEM/alert.jsonl"
 SCAN_THRESHOLD = 5
+INCIDENT_FILE = "/home/akuma/SIEM/incidents.jsonl"
 
 
 def load_offset():
@@ -112,18 +114,26 @@ def check_compromise(ip):
         compromised_ips.add(ip)
 
 
-def check_scan(ip):
-    if scan_count[ip] >= SCAN_THRESHOLD and ip not in scanned_ips:
-        print(f"[LOW] Possible scan - IP {ip}")
-        alert = {
-            "severity": "LOW",
-            "ip": ip,
-            "type": "possible_scan",
-            "count": scan_count[ip],
-            "timestamp": datetime.now().isoformat(),
-        }
-        log_alert(alert)
-        scanned_ips.add(ip)
+def check_scan(ip, event_time):
+    if scan_count[ip] >= SCAN_THRESHOLD:
+        inc = get_or_create_inceident(ip, event_time)
+        if "possible_scan" not in inc.signals:
+            inc.add_signal("possible_scan", "LOW", event_time,
+                            scan_conections=scan_count[ip])
+            print(f"[LOW] Possible scan - IP {ip}")
+            log_incident(inc)
+
+
+def get_or_create_inceident(ip, event_time):
+    if ip not in incidents:
+        incidents[ip] = Incident(ip, event_time)
+    return incidents[ip]
+
+
+def log_incident(incident):
+    with open(INCIDENT_FILE, "a") as f:
+        f.write(json.dumps(incident.to_dict()) + "\n")
+
 
 
 failed_login_count = {}
@@ -137,7 +147,7 @@ break_in_ips = (
     set()
 )  # IPs flagged by sshd for reverse-DNS mismatch; used to enrich alerts, not to alert on its own
 scan_count = {}
-scanned_ips = set()
+incidents = {}
 
 parser = argparse.ArgumentParser(description="Real-time SSH brute-force SIEM")
 parser.add_argument(
@@ -208,7 +218,7 @@ with open(LOG_FILE, "r", errors='replace') as file:
         ):
             ip = match.group(1)
             scan_count[ip] = scan_count.get(ip, 0) + 1
-            check_scan(ip)
+            check_scan(ip, event_time)
         offset = (
             file.tell()
         )  # Update the offset to the current position after reading the line

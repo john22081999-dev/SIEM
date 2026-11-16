@@ -10,7 +10,6 @@ FAILURES_IN_WINDOW = 3
 FAILED_LOGIN_THRESHOLD = 3
 USERNAME_ENUMERATION_THRESHOLD = 5
 CHECKPOINT_FILE = "/home/akuma/SIEM/parser_checkpoint.txt"
-ALERT_FILE = "/home/akuma/SIEM/alert.jsonl"
 SCAN_THRESHOLD = 5
 INCIDENT_FILE = "/home/akuma/SIEM/incidents.jsonl"
 
@@ -46,85 +45,72 @@ def failed_attempts_within_timeframe(timestamps):
     return False
 
 
-def check_and_alert(ip):
-    if ip not in alerted_ips:
-        if failed_login_count[
-            ip
-        ] >= FAILED_LOGIN_THRESHOLD or failed_attempts_within_timeframe(
-            failed_login_timeframe[ip]
-        ):
+def check_and_alert(ip, event_time):
+    if failed_login_count[
+        ip
+    ] >= FAILED_LOGIN_THRESHOLD or failed_attempts_within_timeframe(
+        failed_login_timeframe[ip]
+    ):
+        inc = get_or_create_incident(ip, event_time)
+        if "bruteforce_attempt" not in inc.signals:
+            inc.add_signal(
+                "bruteforce_attempt",
+                "MEDIUM",
+                event_time,
+                failed_attempts=failed_login_count[ip],
+                reverse_dns_mismatch=ip in break_in_ips,
+            )
             print(
                 f"[MEDIUM] Multiple Failed Login Attempts detected from IP: {ip} with {len(failed_login_timeframe[ip])} failed attempts."
             )
-            alert = {
-                "severity": "MEDIUM",
-                "ip": ip,
-                "type": "bruteforce_attempt",
-                "failed_attempts": failed_login_count[ip],
-                "reverse_dns_mismatch": ip
-                in break_in_ips,  # True if this IP also had a reverse-DNS mismatch — combines a weak signal with a strong one for higher confidence
-                "timestamp": datetime.now().isoformat(),
-            }
-            alerted_ips.add(ip)
-            log_alert(alert)
+            log_incident(inc)
 
 
-def log_alert(alert):
-    with open(ALERT_FILE, "a") as f:
-        f.write(json.dumps(alert) + "\n")
+def check_enumeration(ip, event_time):
+    if len(username_attempts[ip]) >= USERNAME_ENUMERATION_THRESHOLD:
+        inc = get_or_create_incident(ip, event_time)
+        if "username_enumeration" not in inc.signals:
+            inc.add_signal(
+                "username_enumeration",
+                "MEDIUM",
+                event_time,
+                distinct_usernames=len(username_attempts[ip]),
+            )
+            print(
+                f"[MEDIUM] Username enumeration from IP: {ip} {len(username_attempts[ip])} distinct usernames tried"
+            )
+            log_incident(inc)
 
 
-def check_enumeration(ip):
-    if (
-        len(username_attempts[ip]) >= USERNAME_ENUMERATION_THRESHOLD
-        and ip not in enumerated_ips
-    ):
-        print(
-            f"[MEDIUM] Username enumeration from IP: {ip} {len(username_attempts[ip])} distinct usernames tried"
-        )
-        alert = {
-            "severity": "MEDIUM",
-            "ip": ip,
-            "type": "username_enumeration",
-            "distinct_usernames": len(username_attempts[ip]),
-            "timestamp": datetime.now().isoformat(),
-        }
-        log_alert(alert)
-        enumerated_ips.add(ip)
-
-
-def check_compromise(ip):
-    if (
-        failed_login_count.get(ip, 0) >= FAILED_LOGIN_THRESHOLD
-        and ip not in compromised_ips
-    ):
-        print(
-            f"[HIGH] Successful brute force — IP {ip} logged in after {failed_login_count[ip]} failed attempts."
-        )
-        alert = {
-            "severity": "HIGH",
-            "ip": ip,
-            "type": "successful_bruteforce",
-            "failed_attempts": failed_login_count[ip],
-            "reverse_dns_mismatch": ip
-            in break_in_ips,  # True if this IP also had a reverse-DNS mismatch — combines a weak signal with a strong one for higher confidence
-            "timestamp": datetime.now().isoformat(),
-        }
-        log_alert(alert)
-        compromised_ips.add(ip)
+def check_compromise(ip, event_time):
+    if failed_login_count.get(ip, 0) >= FAILED_LOGIN_THRESHOLD:
+        inc = get_or_create_incident(ip, event_time)
+        if "successful_bruteforce" not in inc.signals:
+            inc.add_signal(
+                "successful_bruteforce",
+                "HIGH",
+                event_time,
+                failed_attempts=failed_login_count[ip],
+                reverse_dns_mismatch=ip in break_in_ips,
+            )
+            print(
+                f"[HIGH] Successful brute force — IP {ip} logged in after {failed_login_count[ip]} failed attempts."
+            )
+            log_incident(inc)
 
 
 def check_scan(ip, event_time):
     if scan_count[ip] >= SCAN_THRESHOLD:
-        inc = get_or_create_inceident(ip, event_time)
+        inc = get_or_create_incident(ip, event_time)
         if "possible_scan" not in inc.signals:
-            inc.add_signal("possible_scan", "LOW", event_time,
-                            scan_connections=scan_count[ip])
+            inc.add_signal(
+                "possible_scan", "LOW", event_time, scan_connections=scan_count[ip]
+            )
             print(f"[LOW] Possible scan - IP {ip}")
             log_incident(inc)
 
 
-def get_or_create_inceident(ip, event_time):
+def get_or_create_incident(ip, event_time):
     if ip not in incidents:
         incidents[ip] = Incident(ip, event_time)
     return incidents[ip]
@@ -135,14 +121,10 @@ def log_incident(incident):
         f.write(json.dumps(incident.to_dict()) + "\n")
 
 
-
 failed_login_count = {}
 failed_login_timeframe = {}
 accepted_login_count = {}
-alerted_ips = set()
 username_attempts = {}
-enumerated_ips = set()
-compromised_ips = set()
 break_in_ips = (
     set()
 )  # IPs flagged by sshd for reverse-DNS mismatch; used to enrich alerts, not to alert on its own
@@ -161,7 +143,7 @@ args = parser.parse_args()
 LOG_FILE = args.logfile
 
 offset = load_offset()
-with open(LOG_FILE, "r", errors='replace') as file:
+with open(LOG_FILE, "r", errors="replace") as file:
     if check_file_rotation(file, offset):
         offset = 0  # Log file has been rotated, reset offset to 0
     file.seek(offset)  # Move the cursor to the last known position
@@ -182,7 +164,7 @@ with open(LOG_FILE, "r", errors='replace') as file:
             if ip not in username_attempts:
                 username_attempts[ip] = set()
             username_attempts[ip].add(username)
-            check_enumeration(ip)
+            check_enumeration(ip, event_time)
         elif match := re.search(
             r"Failed password for ([\w\s]+) from ([\d.]+)", line, re.IGNORECASE
         ):
@@ -191,7 +173,7 @@ with open(LOG_FILE, "r", errors='replace') as file:
             if ip not in failed_login_timeframe:
                 failed_login_timeframe[ip] = []
             failed_login_timeframe[ip].append(event_time)
-            check_and_alert(ip)
+            check_and_alert(ip, event_time)
         elif match := re.search(
             r"PAM (\d+) .* rhost=([\d.]+)", line
         ):  # not using IGNORECASE here because PAM logs are case-sensitive
@@ -201,13 +183,13 @@ with open(LOG_FILE, "r", errors='replace') as file:
                 if ip not in failed_login_timeframe:
                     failed_login_timeframe[ip] = []
                 failed_login_timeframe[ip].append(event_time)
-            check_and_alert(ip)
+            check_and_alert(ip, event_time)
         elif match := re.search(
             r"Accepted password for ([\w\s]+) from ([\d.]+)", line, re.IGNORECASE
         ):
             ip = match.group(2)
             accepted_login_count[ip] = accepted_login_count.get(ip, 0) + 1
-            check_compromise(ip)
+            check_compromise(ip, event_time)
         elif match := re.search(
             r"\[([\d.]+)\] failed - POSSIBLE BREAK-IN ATTEMPT", line, re.IGNORECASE
         ):

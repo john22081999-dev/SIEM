@@ -12,6 +12,7 @@ USERNAME_ENUMERATION_THRESHOLD = 5
 CHECKPOINT_FILE = "/home/akuma/SIEM/parser_checkpoint.txt"
 SCAN_THRESHOLD = 5
 INCIDENT_FILE = "/home/akuma/SIEM/incidents.jsonl"
+INCIDENT_STATE_FILE = "/home/akuma/SIEM/incidents_state.json"
 
 
 def load_offset():
@@ -63,7 +64,7 @@ def check_and_alert(ip, event_time):
             print(
                 f"[MEDIUM] Multiple Failed Login Attempts detected from IP: {ip} with {len(failed_login_timeframe[ip])} failed attempts."
             )
-            log_incident(inc)
+            record_incident(inc)
 
 
 def check_enumeration(ip, event_time):
@@ -79,7 +80,7 @@ def check_enumeration(ip, event_time):
             print(
                 f"[MEDIUM] Username enumeration from IP: {ip} {len(username_attempts[ip])} distinct usernames tried"
             )
-            log_incident(inc)
+            record_incident(inc)
 
 
 def check_compromise(ip, event_time):
@@ -96,7 +97,7 @@ def check_compromise(ip, event_time):
             print(
                 f"[HIGH] Successful brute force — IP {ip} logged in after {failed_login_count[ip]} failed attempts."
             )
-            log_incident(inc)
+            record_incident(inc)
 
 
 def check_scan(ip, event_time):
@@ -107,7 +108,7 @@ def check_scan(ip, event_time):
                 "possible_scan", "LOW", event_time, scan_connections=scan_count[ip]
             )
             print(f"[LOW] Possible scan - IP {ip}")
-            log_incident(inc)
+            record_incident(inc)
 
 
 def get_or_create_incident(ip, event_time):
@@ -119,6 +120,17 @@ def get_or_create_incident(ip, event_time):
 def log_incident(incident):
     with open(INCIDENT_FILE, "a") as f:
         f.write(json.dumps(incident.to_dict()) + "\n")
+
+
+def save_incident_state():
+    state = {ip: inc.to_dict() for ip, inc in incidents.items()}
+    with open(INCIDENT_STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
+
+
+def record_incident(inc):
+    log_incident(inc)
+    save_incident_state()
 
 
 failed_login_count = {}

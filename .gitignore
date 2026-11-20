@@ -17,3 +17,4 @@ parser_checkpoint.txt
 incidents.jsonl
 *.save
 tail_test.py
+incidents_state.json
